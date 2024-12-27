@@ -1,0 +1,151 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use File::Find;
+use File::Path qw(make_path);
+use File::Basename;
+use Getopt::Long;
+use List::Util qw(max);
+
+sub collect_data {
+    my ($directories, $output_dir, $verbose) = @_;
+    my $train_file_path = "$output_dir/train.txt";
+    my $train_scaled_path = "$output_dir/train.scale";
+    my $test_file_path = "$output_dir/test.txt";
+    my $test_scaled_path = "$output_dir/test.scale";
+    my $labels_file_path = "$output_dir/labels.txt";
+    my $vocabulary_file_path = "$output_dir/vocabulary.txt";
+    my $scale_range_path = "$output_dir/scale.range";
+
+
+    # Create output directory if it doesn't exist
+    make_path($output_dir) unless -d $output_dir;
+
+    if ($verbose) {
+        print "Preparing training data in $train_file_path\n";
+    }
+
+    my %labels;
+    my %vocabulary;
+    my $vocab_index = 1;
+    my @train_lines;
+    my @test_lines;
+
+    foreach my $dir (@$directories) {
+        find({ no_chdir=>1, wanted=>sub {
+            return if -d $_;
+            my $file_path = $File::Find::name;
+            my $label = basename($File::Find::dir);
+            $labels{$label}++;
+
+            # Read and preprocess text from file
+            open my $fh, "<", $file_path or do {
+            	system('pwd');
+                warn "Cannot open input file $file_path: $!";
+                return;
+            };
+            my $text = do { local $/; <$fh> };
+            close $fh;
+
+            $text =~ s/[^a-zA-Z\s]//g; # Remove non-alphabetic chars
+            $text =~ s/\r?\n/ /g;
+            $text =~ s/^\s+|\s+$//g;
+
+            my @words = split(/\s+/, lc($text));
+            my %word_counts;
+            foreach my $word (@words) {
+                next if $word eq ''; # skip empty string after splitting
+                if (!exists $vocabulary{$word}) {
+                    $vocabulary{$word} = $vocab_index++;
+                }
+                $word_counts{$vocabulary{$word}}++;
+            }
+
+             # Build LIBSVM line
+            my $libsvm_line = "$labels{$label} ";
+            for my $index (sort {$a <=> $b} keys %word_counts) {
+                $libsvm_line .= "$index:$word_counts{$index} ";
+            }
+
+            # Assign 80% of the data to the training set and 20% to the test set
+            if (rand() < 0.8) {
+                push @train_lines, "$libsvm_line\n";
+            }
+            else {
+                push @test_lines, "$libsvm_line\n";
+            }
+        }}, $dir);
+    }
+
+    # Write data to files before scaling
+
+    open my $train_fh, ">", $train_file_path or die "Cannot open train_file $train_file_path: $!";
+    print $train_fh @train_lines;
+    close $train_fh;
+
+     open my $test_fh, ">", $test_file_path or die "Cannot open test_file $test_file_path: $!";
+    print $test_fh @test_lines;
+    close $test_fh;
+
+    # Scale the training data
+    my $svm_scale_cmd = "svm-scale -l 0 -u 1 -s $scale_range_path $train_file_path > $train_scaled_path";
+
+     if ($verbose) {
+      print "Scaling training data: $svm_scale_cmd\n";
+    }
+
+    system($svm_scale_cmd) == 0 or die "svm-scale failed for training data: $!";
+
+     # Scale the test data
+    $svm_scale_cmd = "svm-scale -r $scale_range_path $test_file_path > $test_scaled_path";
+     if ($verbose) {
+      print "Scaling test data: $svm_scale_cmd\n";
+    }
+
+    system($svm_scale_cmd) == 0 or die "svm-scale failed for testing data: $!";
+
+
+
+    # Save labels to a file
+    open my $labels_fh, ">", $labels_file_path or die "Cannot open labels_file $labels_file_path: $!";
+    print $labels_fh map { "$_\n" } sort keys %labels;
+    close $labels_fh;
+
+    # Save Vocabulary to a File
+    open my $vocab_fh, ">", $vocabulary_file_path or die "Cannot open vocabulary file $vocabulary_file_path: $!";
+    foreach my $word (sort { $vocabulary{$a} <=> $vocabulary{$b} } keys %vocabulary){
+     print $vocab_fh  "$vocabulary{$word}\t$word\n";
+    }
+     close $vocab_fh;
+    return ($train_scaled_path, $test_scaled_path, $labels_file_path, $vocabulary_file_path);
+}
+
+sub main {
+    my $output_dir;
+    my $verbose;
+    GetOptions(
+        "o=s" => \$output_dir,
+        "v+" => \$verbose,
+    ) or die "Error in command line arguments\n";
+
+    my @directories = @ARGV;
+
+    die "You must specify output directory with -o" unless $output_dir;
+    die "No directories specified for processing" unless @directories;
+
+    if ($verbose) {
+        print "Output directory: $output_dir\n";
+        print "Training on directories: " . join(", ", @directories) . "\n";
+    }
+
+   my ($train_scaled_path, $test_scaled_path, $labels_file, $vocabulary_file) = collect_data(\@directories, $output_dir, $verbose);
+
+    print "Scaled training data: $train_scaled_path\n";
+    print "Scaled test data: $test_scaled_path\n";
+    print "Labels saved to: $labels_file\n";
+    print "Vocabulary saved to: $vocabulary_file\n";
+    # Now you can use $train_scaled_path with svm-train
+    # Use $test_scaled_path with svm-predict
+}
+
+main() unless caller;
