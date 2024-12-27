@@ -1,166 +1,189 @@
-#!/usr/bin/perl -d
 #!/usr/bin/perl
-use strict;
-use warnings;
+use v5.24; # implies use warnings and strict now
 use Getopt::Long;
 use Encode qw(decode encode is_utf8);
 use List::Util qw(max);
+use File::Temp qw/ tempfile /;
+use String::ShellQuote;
+
+my $verbose;
+
+sub se; sub sel; # predeclaration is needed
+sub pe; sub pel;
+
+sub se { say STDERR @_ }
+sub sel { my $l=shift; say STDERR @_ if $verbose >= $l }
+sub pe { print STDERR @_ }
+sub pel { my $l=shift; print STDERR @_ if $verbose >= $l }
 
 sub preprocess_text {
-    my ($text) = @_;
+	my ($text) = @_;
 
-  # 1. Character Decoding and Normalization
-    if (!is_utf8($text)) {
-       # If not valid UTF8, treat as raw 8-bit, but use Encode to normalize.
-        $text = encode("utf8", decode('iso-8859-1', $text));
-    }
+	# 1. Character Decoding and Normalization
+	if (!is_utf8($text)) {
+		# If not valid UTF8, treat as raw 8-bit, but use Encode to normalize.
+		$text = encode("utf8", decode('iso-8859-1', $text));
+	}
 
-    $text =~ s/(\\r\\n|\\r|\\n)/\n/g;  # Convert newlines
-    $text =~ s/(\\r|\\n)/\n/g;  # Convert newlines
-    $text =~ s/\\t/\t/g; # Convert escaped tabs to tabs
-    $text = lc($text);  # Convert to lowercase
-    
-    # 2. Tokenization
-     my @tokens;
-    my @remaining_tokens = split(/[^a-z]+/i, $text);
-    push @tokens, @remaining_tokens;
-    return @tokens;
+	$text =~ s/(\\r\\n|\\r|\\n)/\n/g;  # Convert newlines
+	$text =~ s/(\\r|\\n)/\n/g;	# Convert newlines
+	$text =~ s/\\t/\t/g; # Convert escaped tabs to tabs
+	$text = lc($text);	# Convert to lowercase
+	
+	# 2. Tokenization
+	my @tokens;
+	my @remaining_tokens = split(/[^a-z]+/i, $text);
+	push @tokens, @remaining_tokens;
+	return @tokens;
 }
 
 sub load_vocabulary {
-    my ($vocabulary_file) = @_;
-    my %vocabulary;
-    open my $vocab_fh, "<", $vocabulary_file or die "Cannot open vocabulary file $vocabulary_file: $!";
-    while(<$vocab_fh>) {
-        chomp;
-        my ($index, $word) = split /\t/;
-        $vocabulary{$word} = $index;
-    }
-    close $vocab_fh;
-    return %vocabulary;
+	my ($vocabulary_file) = @_;
+	my %vocabulary;
+	open my $vocab_fh, "<", $vocabulary_file or die "Cannot open vocabulary file $vocabulary_file: $!";
+	while(<$vocab_fh>) {
+		chomp;
+		my ($index, $word) = split /\t/;
+		$vocabulary{$word} = $index;
+	}
+	close $vocab_fh;
+	return %vocabulary;
 }
 
 sub load_labels {
-    my ($labels_file) = @_;
-    my @labels;
-    open my $labels_fh, "<", $labels_file or die "Cannot open labels file $labels_file: $!";
-    while(<$labels_fh>) {
-        chomp;
-        push @labels, $_;
-    }
-    close $labels_fh;
-    return @labels;
+	my ($labels_file) = @_;
+	my @labels;
+	open my $labels_fh, "<", $labels_file or die "Cannot open labels file $labels_file: $!";
+	while(<$labels_fh>) {
+		chomp;
+		push @labels, $_;
+	}
+	close $labels_fh;
+	return @labels;
 }
 
 sub create_libsvm_line {
-    my ($text, $vocabulary) = @_;
-     my @tokens = preprocess_text($text);
-     my %word_counts;
-    foreach my $token (@tokens) {
-        next if $token eq '';
-        if (exists $vocabulary->{$token}) {
-            $word_counts{$vocabulary->{$token}}++;
-        }
-    }
-     my $libsvm_line = "";
-     for my $index (sort {$a <=> $b} keys %word_counts) {
-            $libsvm_line .= "$index:$word_counts{$index} ";
-    }
-    return $libsvm_line;
+	my ($text, $vocabulary) = @_;
+	my @tokens = preprocess_text($text);
+	my %word_counts;
+	foreach my $token (@tokens) {
+		next if $token eq '';
+		if (exists $vocabulary->{$token}) {
+			$word_counts{$vocabulary->{$token}}++;
+		}
+	}
+	my $libsvm_line = "";
+	for my $index (sort {$a <=> $b} keys %word_counts) {
+		$libsvm_line .= "$index:$word_counts{$index} ";
+	}
+	return $libsvm_line;
 }
 
 sub scale_input {
-    my ($libsvm_line, $scale_range_path) = @_;
-    my $scaled_line;
-    open my $pipe, '|-', "svm-scale -r '$scale_range_path'" or die "Can't pipe to svm-scale: $!";
-    print $pipe $libsvm_line;
-    close $pipe;
-     my @output = <$pipe>;
-      $scaled_line = join ("", @output); # get the scaled output
-    return $scaled_line;
+	my ($libsvm_line, $scale_range_path) = @_;
+	my $scaled_line;
+	
+	my ($fh, $filename) = tempfile(UNLINK => 1);
+	print $fh "$libsvm_line\n";
+	close $fh;
+
+	my @cmd = ('svm-scale', '-r', $scale_range_path, $filename);
+	my $cmd = shell_quote(@cmd);
+	sel 1, "  Command: $cmd";
+	my $scaled_output = `$cmd`;
+	chomp $scaled_output;
+	return $scaled_output;
 }
 
 sub classify_text {
-    my ($text, $model_path, $vocabulary_file, $labels_file, $scale_range_path) = @_;
-    my %vocabulary = load_vocabulary($vocabulary_file);
-    my @labels = load_labels($labels_file);
+	my ($text, $model_path, $vocabulary_file, $labels_file, $scale_range_path) = @_;
+	sel 1, "Loading vocabulary ($vocabulary_file)...";
+	my %vocabulary = load_vocabulary($vocabulary_file);
+	sel 1, "Loading labels ($labels_file)...";
+	my @labels = load_labels($labels_file);
 
-    my $libsvm_line = create_libsvm_line($text, \%vocabulary);
-    my $scaled_line = scale_input($libsvm_line, $scale_range_path);
+	sel 1, "Create libsvm line from text...";
+	my $libsvm_line = create_libsvm_line($text, \%vocabulary);
+	sel 1, "Scaling input...";
+	my $scaled_line = scale_input($libsvm_line, $scale_range_path);
+	
+	my @predictions;
+	my $raw_prediction;
+	
+	my ($fh, $filename) = tempfile(UNLINK => 1);
+	print $fh "$scaled_line\n";
+	close $fh;
 
 
-     my @predictions;
-     my $raw_prediction;
+	sel 1, "Predicting...";
+	my @cmd = ('svm-predict', '-b', '1', '-q', $filename, $model_path);
+	my $cmd = shell_quote(@cmd);
+	sel 1, "  Command: $cmd";
+	my @output = `$cmd`;
 
-    open my $pipe, '|-', "svm-predict -b 1 -q - $model_path" or die "Can't pipe to svm-predict: $!";
-    print $pipe $scaled_line;
-    close $pipe;
-     my @output = <$pipe>;
+	# first line is the prediction label, subsequent lines are the probability
+	# the 0th column is the predicted label.
+	# subsequent columns are in the order of labels in labels.txt
 
-   # first line is the prediction label, subsequent lines are the probability
-  # the 0th column is the predicted label.
-  # subsequent columns are in the order of labels in labels.txt
+	$raw_prediction = shift @output;
+	chomp $raw_prediction;
 
-    $raw_prediction = shift @output;
 
-    my @probabilities;
-    for my $line (@output) {
-        chomp $line;
-        my @prob = split(/\s+/, $line);
-        for my $i (0..$#labels) {
-          push @{$probabilities[$i]}, $prob[$i];
-       }
-    }
+	my @probabilities;
+	for my $line (@output) {
+		chomp $line;
+		my @prob = split(/\s+/, $line);
+		for my $i (0..$#labels) {
+			push @{$probabilities[$i]}, $prob[$i];
+		}
+	}
 
-    my @ranked_predictions;
-        for (my $i=0; $i <= $#labels; $i++){
-              push @ranked_predictions, [ $labels[$i], $probabilities[$i][0] ];
-    }
+	my @ranked_predictions;
+		for (my $i=0; $i <= $#labels; $i++) {
+			push @ranked_predictions, [ $labels[$i], $probabilities[$i][0] ];
+	}
 
-     @ranked_predictions = sort { $b->[1] <=> $a->[1] } @ranked_predictions;
+	@ranked_predictions = sort { $b->[1] <=> $a->[1] } @ranked_predictions;
 
-    return @ranked_predictions;
+	return @ranked_predictions;
 }
 
 sub main {
-    my $idx_dir;
-    my $text;
-    my $stdin_text;
-    GetOptions(
-        "d=s" => \$idx_dir,
-        "t=s" => \$text,
-        "s"   => \$stdin_text, # use stdin if the flag was specified
-    ) or die "Error in command line arguments\n";
+	my $idx_dir;
+	my $text;
+	my $stdin_text;
+	GetOptions(
+		"d=s" => \$idx_dir,
+		"t=s" => \$text,
+		"verbose|v+" => \$verbose, # global, incremental
+		"s"   => \$stdin_text, # use stdin if the flag was specified
+	) or die "Error in command line arguments\n";
 
-    die "You must specify an index directory with -d" unless $idx_dir;
+	die "You must specify an index directory with -d" unless $idx_dir;
 
+	if ($stdin_text){
+		$text = do { local $/; <STDIN> };
+	}
+	die "You must specify text to classify with -t or -s" unless defined $text;
 
-    if ($stdin_text){
-       $text = do { local $/; <STDIN> };
-    }
-     die "You must specify text to classify with -t or -s" unless defined $text;
+	my $model_path;
+	if (-f "$idx_dir/svm.model"){
+		$model_path = "$idx_dir/svm.model";
+	} elsif (-f "$idx_dir/svm/easy.model") {
+		$model_path = "$idx_dir/svm/easy.model";
+	} else {
+		die "Could not find svm.model or svm/easy.model in the idx dir";
+	}
 
-    my $model_path;
-    if (-f "$idx_dir/svm.model"){
-       $model_path = "$idx_dir/svm.model";
-    }
-    elsif (-f "$idx_dir/svm/easy.model") {
-       $model_path = "$idx_dir/svm/easy.model";
-    }
-    else {
-       die "Could not find svm.model or svm/easy.model in the idx dir";
-    }
+	my $vocabulary_file = "$idx_dir/vocabulary.txt";
+	my $labels_file = "$idx_dir/labels.txt";
+	my $scale_range_path = "$idx_dir/scale.range";
 
-    my $vocabulary_file = "$idx_dir/vocabulary.txt";
-    my $labels_file = "$idx_dir/labels.txt";
-    my $scale_range_path = "$idx_dir/scale.range";
-
-    my @ranked_predictions = classify_text($text, $model_path, $vocabulary_file, $labels_file, $scale_range_path);
-
-    foreach my $prediction (@ranked_predictions) {
-        $DB::single=1;
-        # say "$$prediction[0] $$prediction[1]";
-    }
+	my @ranked_predictions = classify_text($text, $model_path, $vocabulary_file, $labels_file, $scale_range_path);
+	
+	foreach my $prediction (@ranked_predictions) {
+		say join(' ', $prediction->[0], $prediction->[1]);
+	}
 }
 
 main() unless caller;
