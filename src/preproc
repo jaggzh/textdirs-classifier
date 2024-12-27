@@ -24,31 +24,7 @@ sub preprocess_text {
     $text = lc($text);  # Convert to lowercase
     
     # 2. Tokenization
-    my @tokens;
-
-    # URL Handling: Keep meaningful parts, split on slashes
-   # while ($text =~ /(https?:\/\/[^\s]+)/g) {
-   #  my $url = $1;
-   #      push @tokens, split(/(\/)/, $url); # Split on slashes within URLs, but keep the slashes as a token
-   #      $text =~ s/$url//;
-   #  }
-
-    # Delimit on field-value pairs
-    # while ($text =~ /([a-zA-Z0-9_]+=[a-zA-Z0-9_]+)/g) {
-    #     my $field_pair = $1;
-    #      push @tokens, split(/(=)/, $field_pair);
-    #     $text =~ s/$field_pair//;
-    # }
-    # Delimit on punctuation, but *only* if it does not directly follow another character
-
-	# $text =~ s/[a-z]+/ \& /g;
-    # $text =~ s/([.,;?!])(?!\w)/ $1 /g; # add spaces around punctuation if it doesn't preceed a word character (so that it splits from a word and gets tokenized)
-    # $text =~ s/([.,;?!])(?<!\w)/ $1 /g; # add spaces around punctuation if it doesn't succeed a word character
-    #  $text =~ s/['"]//g; # Remove decorative punctuation
-
-
-      #Split all tokens based on remaining whitespace
-    # my @remaining_tokens = split(/\s+/, $text);
+     my @tokens;
     my @remaining_tokens = split(/[^a-z]+/i, $text);
     push @tokens, @remaining_tokens;
     return @tokens;
@@ -58,8 +34,10 @@ sub collect_data {
     my ($directories, $output_dir, $verbose) = @_;
     my $train_file_path = "$output_dir/train.txt";
     my $train_scaled_path = "$output_dir/train.scale";
-    my $test_file_path = "$output_dir/test.txt";
+     my $test_file_path = "$output_dir/test.txt";
     my $test_scaled_path = "$output_dir/test.scale";
+    my $combined_file_path = "$output_dir/combined.txt"; # Combined data for scaling
+    my $combined_scaled_path = "$output_dir/combined.scale";  # Scaled combined data
     my $labels_file_path = "$output_dir/labels.txt";
     my $vocabulary_file_path = "$output_dir/vocabulary.txt";
     my $scale_range_path = "$output_dir/scale.range";
@@ -69,7 +47,7 @@ sub collect_data {
     make_path($output_dir) unless -d $output_dir;
 
     if ($verbose) {
-        print "Preparing training data in $train_file_path\n";
+        say "Preparing training data in $train_file_path";
     }
 
     my %labels;
@@ -77,6 +55,7 @@ sub collect_data {
     my $vocab_index = 1;
     my @train_lines;
     my @test_lines;
+    my @combined_lines; # Combined lines for scaling
 
 
     foreach my $dir (@$directories) {
@@ -110,40 +89,53 @@ sub collect_data {
                 $libsvm_line .= "$index:$word_counts{$index} ";
             }
 
-            if (rand() < 0.8) {
+
+             if (rand() < 0.8) {
                 push @train_lines, "$libsvm_line\n";
+                 push @combined_lines, "$libsvm_line\n";  # Add to combined lines
             } else {
                 push @test_lines, "$libsvm_line\n";
+                   push @combined_lines, "$libsvm_line\n";  # Add to combined lines
             }
 
         }}, $dir);
     }
 
-   # Write data to files before scaling
-    open my $train_fh, ">", $train_file_path or die "Cannot open train_file $train_file_path: $!";
-    print $train_fh @train_lines;
+    # Write combined data before scaling
+    open my $combined_fh, ">", $combined_file_path or die "Cannot open combined_file $combined_file_path: $!";
+    print $combined_fh @combined_lines;
+    close $combined_fh;
+
+
+    # Scale combined data
+    my $svm_scale_cmd = "svm-scale -l 0 -u 1 -s $scale_range_path $combined_file_path > $combined_scaled_path";
+    if ($verbose) {
+      say "Scaling combined data: $svm_scale_cmd";
+    }
+     system($svm_scale_cmd) == 0 or die "svm-scale failed for combined data: $!";
+
+
+   # Write data to files after scaling
+
+   # Read the combined scaled file, and split it back into train and test:
+   open my $scaled_fh, "<", $combined_scaled_path or die "Cannot open scaled combined file $combined_scaled_path: $!";
+   my @scaled_lines = <$scaled_fh>;
+   close $scaled_fh;
+
+   my $num_train_lines = scalar @train_lines;
+   my @scaled_train_lines = @scaled_lines[0..$num_train_lines-1];
+   my @scaled_test_lines = @scaled_lines[$num_train_lines..$#scaled_lines];
+
+
+    open my $train_fh, ">", $train_scaled_path or die "Cannot open train_file $train_scaled_path: $!";
+    print $train_fh @scaled_train_lines;
     close $train_fh;
 
-     open my $test_fh, ">", $test_file_path or die "Cannot open test_file $test_file_path: $!";
-    print $test_fh @test_lines;
+
+    open my $test_fh, ">", $test_scaled_path or die "Cannot open test_file $test_scaled_path: $!";
+    print $test_fh @scaled_test_lines;
     close $test_fh;
 
-    # Scale the training data
-    my $svm_scale_cmd = "svm-scale -l 0 -u 1 -s $scale_range_path $train_file_path > $train_scaled_path";
-
-     if ($verbose) {
-      print "Scaling training data: $svm_scale_cmd\n";
-    }
-
-    system($svm_scale_cmd) == 0 or die "svm-scale failed for training data: $!";
-
-     # Scale the test data
-    $svm_scale_cmd = "svm-scale -r $scale_range_path $test_file_path > $test_scaled_path";
-     if ($verbose) {
-      print "Scaling test data: $svm_scale_cmd\n";
-    }
-
-    system($svm_scale_cmd) == 0 or die "svm-scale failed for testing data: $!";
 
 
     # Save labels to a file
@@ -175,8 +167,8 @@ sub main {
     die "No directories specified for processing" unless @directories;
 
     if ($verbose) {
-        print "Output directory: $output_dir\n";
-        print "Training on directories: " . join(", ", @directories) . "\n";
+        say "Output directory: $output_dir";
+        say "Training on directories: " . join(", ", @directories);
     }
     my ($train_scaled_path, $test_scaled_path, $labels_file, $vocabulary_file, $svm_model_path) = collect_data(\@directories, $output_dir, $verbose);
 
