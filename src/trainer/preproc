@@ -1,11 +1,58 @@
 #!/usr/bin/perl
+use feature 'say';
 use strict;
 use warnings;
 use File::Find;
 use File::Path qw(make_path);
 use File::Basename;
 use Getopt::Long;
-use List::Util qw(max);
+use URI;
+use Encode qw(decode encode is_utf8);
+
+sub preprocess_text {
+    my ($text) = @_;
+
+  # 1. Character Decoding and Normalization
+    if (!is_utf8($text)) {
+       # If not valid UTF8, treat as raw 8-bit, but use Encode to normalize.
+        $text = encode("utf8", decode('iso-8859-1', $text));
+    }
+
+    $text =~ s/(\\r\\n|\\r|\\n)/\n/g;  # Convert newlines
+    $text =~ s/(\\r|\\n)/\n/g;  # Convert newlines
+    $text =~ s/\\t/\t/g; # Convert escaped tabs to tabs
+    $text = lc($text);  # Convert to lowercase
+    
+    # 2. Tokenization
+    my @tokens;
+
+    # URL Handling: Keep meaningful parts, split on slashes
+   # while ($text =~ /(https?:\/\/[^\s]+)/g) {
+   #  my $url = $1;
+   #      push @tokens, split(/(\/)/, $url); # Split on slashes within URLs, but keep the slashes as a token
+   #      $text =~ s/$url//;
+   #  }
+
+    # Delimit on field-value pairs
+    # while ($text =~ /([a-zA-Z0-9_]+=[a-zA-Z0-9_]+)/g) {
+    #     my $field_pair = $1;
+    #      push @tokens, split(/(=)/, $field_pair);
+    #     $text =~ s/$field_pair//;
+    # }
+    # Delimit on punctuation, but *only* if it does not directly follow another character
+
+	# $text =~ s/[a-z]+/ \& /g;
+    # $text =~ s/([.,;?!])(?!\w)/ $1 /g; # add spaces around punctuation if it doesn't preceed a word character (so that it splits from a word and gets tokenized)
+    # $text =~ s/([.,;?!])(?<!\w)/ $1 /g; # add spaces around punctuation if it doesn't succeed a word character
+    #  $text =~ s/['"]//g; # Remove decorative punctuation
+
+
+      #Split all tokens based on remaining whitespace
+    # my @remaining_tokens = split(/\s+/, $text);
+    my @remaining_tokens = split(/[^a-z]+/i, $text);
+    push @tokens, @remaining_tokens;
+    return @tokens;
+}
 
 sub collect_data {
     my ($directories, $output_dir, $verbose) = @_;
@@ -16,7 +63,7 @@ sub collect_data {
     my $labels_file_path = "$output_dir/labels.txt";
     my $vocabulary_file_path = "$output_dir/vocabulary.txt";
     my $scale_range_path = "$output_dir/scale.range";
-
+    my $svm_model_path = "$output_dir/svm.model";
 
     # Create output directory if it doesn't exist
     make_path($output_dir) unless -d $output_dir;
@@ -31,6 +78,7 @@ sub collect_data {
     my @train_lines;
     my @test_lines;
 
+
     foreach my $dir (@$directories) {
         find({ no_chdir=>1, wanted=>sub {
             return if -d $_;
@@ -40,45 +88,38 @@ sub collect_data {
 
             # Read and preprocess text from file
             open my $fh, "<", $file_path or do {
-            	system('pwd');
                 warn "Cannot open input file $file_path: $!";
                 return;
             };
             my $text = do { local $/; <$fh> };
             close $fh;
 
-            $text =~ s/[^a-zA-Z\s]//g; # Remove non-alphabetic chars
-            $text =~ s/\r?\n/ /g;
-            $text =~ s/^\s+|\s+$//g;
-
-            my @words = split(/\s+/, lc($text));
+            my @tokens = preprocess_text($text);
             my %word_counts;
-            foreach my $word (@words) {
-                next if $word eq ''; # skip empty string after splitting
-                if (!exists $vocabulary{$word}) {
-                    $vocabulary{$word} = $vocab_index++;
-                }
-                $word_counts{$vocabulary{$word}}++;
-            }
 
-             # Build LIBSVM line
+            foreach my $token (@tokens) {
+                next if $token eq ''; # skip empty string after splitting
+                if (!exists $vocabulary{$token}) {
+                    $vocabulary{$token} = $vocab_index++;
+                }
+                $word_counts{$vocabulary{$token}}++;
+            }
+          # Build LIBSVM line
             my $libsvm_line = "$labels{$label} ";
             for my $index (sort {$a <=> $b} keys %word_counts) {
                 $libsvm_line .= "$index:$word_counts{$index} ";
             }
 
-            # Assign 80% of the data to the training set and 20% to the test set
             if (rand() < 0.8) {
                 push @train_lines, "$libsvm_line\n";
-            }
-            else {
+            } else {
                 push @test_lines, "$libsvm_line\n";
             }
+
         }}, $dir);
     }
 
-    # Write data to files before scaling
-
+   # Write data to files before scaling
     open my $train_fh, ">", $train_file_path or die "Cannot open train_file $train_file_path: $!";
     print $train_fh @train_lines;
     close $train_fh;
@@ -105,11 +146,11 @@ sub collect_data {
     system($svm_scale_cmd) == 0 or die "svm-scale failed for testing data: $!";
 
 
-
     # Save labels to a file
     open my $labels_fh, ">", $labels_file_path or die "Cannot open labels_file $labels_file_path: $!";
     print $labels_fh map { "$_\n" } sort keys %labels;
     close $labels_fh;
+
 
     # Save Vocabulary to a File
     open my $vocab_fh, ">", $vocabulary_file_path or die "Cannot open vocabulary file $vocabulary_file_path: $!";
@@ -117,7 +158,7 @@ sub collect_data {
      print $vocab_fh  "$vocabulary{$word}\t$word\n";
     }
      close $vocab_fh;
-    return ($train_scaled_path, $test_scaled_path, $labels_file_path, $vocabulary_file_path);
+   return ($train_scaled_path, $test_scaled_path, $labels_file_path, $vocabulary_file_path, $svm_model_path);
 }
 
 sub main {
@@ -137,13 +178,18 @@ sub main {
         print "Output directory: $output_dir\n";
         print "Training on directories: " . join(", ", @directories) . "\n";
     }
+    my ($train_scaled_path, $test_scaled_path, $labels_file, $vocabulary_file, $svm_model_path) = collect_data(\@directories, $output_dir, $verbose);
 
-   my ($train_scaled_path, $test_scaled_path, $labels_file, $vocabulary_file) = collect_data(\@directories, $output_dir, $verbose);
+	print <<~"EOT";
 
-    print "Scaled training data: $train_scaled_path\n";
-    print "Scaled test data: $test_scaled_path\n";
-    print "Labels saved to: $labels_file\n";
-    print "Vocabulary saved to: $vocabulary_file\n";
+    	Scaled training data: $train_scaled_path
+    	Scaled test data: $test_scaled_path
+    	Labels saved to: $labels_file
+    	Vocabulary saved to: $vocabulary_file
+
+    	To train, use:
+    	svm-train '$train_scaled_path' '$svm_model_path'
+    	EOT
     # Now you can use $train_scaled_path with svm-train
     # Use $test_scaled_path with svm-predict
 }
