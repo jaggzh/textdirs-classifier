@@ -59,6 +59,10 @@ sub load_labels {
 		push @labels, $_;
 	}
 	close $labels_fh;
+    if (scalar @labels == 0){
+      die "ERROR: failed to read labels";
+    }
+
 	return @labels;
 }
 
@@ -83,7 +87,7 @@ sub scale_input {
 	my ($libsvm_line, $scale_range_path) = @_;
 	my $scaled_line;
 	
-	my ($fh, $filename) = tempfile(UNLINK => 1);
+	my ($fh, $filename) = tempfile(); #UNLINK => 1);
 	print $fh "$libsvm_line\n";
 	close $fh;
 
@@ -101,25 +105,35 @@ sub classify_text {
 	my %vocabulary = load_vocabulary($vocabulary_file);
 	sel 1, "Loading labels ($labels_file)...";
 	my @labels = load_labels($labels_file);
-
 	sel 1, "Create libsvm line from text...";
 	my $libsvm_line = create_libsvm_line($text, \%vocabulary);
+	if ($libsvm_line =~ /^\s*$/) { # No known tokens
+		return ();
+	}
 	sel 1, "Scaling input...";
 	my $scaled_line = scale_input($libsvm_line, $scale_range_path);
 	
 	my @predictions;
 	my $raw_prediction;
 	
-	my ($fh, $filename) = tempfile(UNLINK => 1);
-	print $fh "$scaled_line\n";
-	close $fh;
+    my ($input_fh, $input_filename) = tempfile(UNLINK => 1);
+    print $input_fh "$scaled_line\n";
+    close $input_fh;
 
+    my ($output_fh, $output_filename) = tempfile(UNLINK => 1);
 
 	sel 1, "Predicting...";
-	my @cmd = ('svm-predict', '-b', '1', '-q', $filename, $model_path);
+	my @cmd = ('svm-predict', '-b', '1', '-q', $input_filename, $model_path, $output_filename);
 	my $cmd = shell_quote(@cmd);
 	sel 1, "  Command: $cmd";
-	my @output = `$cmd`;
+
+	`$cmd`; # We don't read STDOUT, but save it to a temporary file
+
+
+
+   open my $output_fh, "<", $output_filename or die "Could not open svm-predict output: $!";
+   my @output = <$output_fh>; # read it back from the temp file
+   close $output_fh;
 
 	# first line is the prediction label, subsequent lines are the probability
 	# the 0th column is the predicted label.
@@ -155,7 +169,7 @@ sub main {
 	GetOptions(
 		"d=s" => \$idx_dir,
 		"t=s" => \$text,
-		"verbose|v+" => \$verbose, # global, incremental
+        "verbose|v+" => \$verbose,
 		"s"   => \$stdin_text, # use stdin if the flag was specified
 	) or die "Error in command line arguments\n";
 

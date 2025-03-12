@@ -34,7 +34,7 @@ sub collect_data {
     my ($directories, $output_dir, $verbose) = @_;
     my $train_file_path = "$output_dir/train.txt";
     my $train_scaled_path = "$output_dir/train.scale";
-     my $test_file_path = "$output_dir/test.txt";
+    my $test_file_path = "$output_dir/test.txt";
     my $test_scaled_path = "$output_dir/test.scale";
     my $combined_file_path = "$output_dir/combined.txt"; # Combined data for scaling
     my $combined_scaled_path = "$output_dir/combined.scale";  # Scaled combined data
@@ -180,7 +180,7 @@ sub main {
     	Vocabulary saved to: $vocabulary_file
 
     	To train, use:
-    	svm-train '$train_scaled_path' '$svm_model_path'
+    	svm-train -b 1 '$train_scaled_path' '$svm_model_path'
     	EOT
     # Now you can use $train_scaled_path with svm-train
     # Use $test_scaled_path with svm-predict
